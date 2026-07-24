@@ -3,7 +3,7 @@ name: 每日检查并更新 Sing-Box 测试版
 on:
   workflow_dispatch:
   schedule:
-    # 中国时间 02:30，与正式版检查错开
+    # 中国时间 02:30
     - cron: '30 18 * * *'
 
 permissions:
