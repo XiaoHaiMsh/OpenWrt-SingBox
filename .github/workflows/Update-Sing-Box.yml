@@ -7,7 +7,6 @@ on:
     - cron: '15 18 * * *'
 
 permissions:
-  actions: write
   contents: write
 
 concurrency:
@@ -122,11 +121,3 @@ jobs:
             "$PACKAGE_BRANCH" \
             "chore: 更新 Sing-Box 至 ${UPSTREAM_VERSION}-r1" \
             sing-box/Makefile
-
-      - name: 编译并发布 Sing-Box 核心 APK
-        if: steps.upstream.outputs.changed == 'true'
-        env:
-          PACKAGE_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          source .github/scripts/ci-common.sh
-          ci_dispatch_apk_build "$PACKAGE_BRANCH" sing-box
