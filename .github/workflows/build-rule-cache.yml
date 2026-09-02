@@ -1,143 +1,99 @@
-name: Build sing-box Rule Cache
+name: Build rule-set cache.db
 
 on:
   workflow_dispatch:
+    inputs:
+      singbox_version:
+        description: '要使用的 sing-box 版本 tag（例如 v1.11.0），必须和目标路由器上实际运行的版本一致'
+        required: true
+        default: 'v1.11.0'
 
 jobs:
-  build:
+  build-cache:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Download sing-box 1.14.0
+      - name: Download sing-box
         run: |
-          set -e
-
-          VERSION="1.14.0"
-
-          curl -fL \
-            -o sing-box.tar.gz \
-            "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
-
+          VER="${{ github.event.inputs.singbox_version }}"
+          VER_NUM="${VER#v}"
+          curl -fL -o sing-box.tar.gz \
+            "https://github.com/SagerNet/sing-box/releases/download/${VER}/sing-box-${VER_NUM}-linux-amd64.tar.gz"
           tar -xzf sing-box.tar.gz
+          mv "sing-box-${VER_NUM}-linux-amd64/sing-box" ./sing-box
+          chmod +x ./sing-box
+          ./sing-box version
 
-          chmod +x "sing-box-${VERSION}-linux-amd64/sing-box"
-
-          "sing-box-${VERSION}-linux-amd64/sing-box" version
-
-          echo "SING_BOX=$PWD/sing-box-${VERSION}-linux-amd64/sing-box" >> "$GITHUB_ENV"
-
-      - name: Download rule-sets
+      - name: Write temp config
         run: |
-          set -e
-
-          mkdir -p rules
-
-          curl -fL \
-            -o rules/geoip-cn.srs \
-            "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs"
-
-          curl -fL \
-            -o rules/geosite-cn.srs \
-            "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
-
-          curl -fL \
-            -o rules/geosite-noncn.srs \
-            "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/geolocation-!cn.srs"
-
-          ls -lh rules/
-
-      - name: Prepare cache environment
-        run: |
-          set -e
-
-          rm -rf cache
-          mkdir -p cache
-
           cat > config.json <<'EOF'
           {
-            "log": {
-              "level": "info"
-            },
+            "log": { "level": "warn", "timestamp": true },
+            "outbounds": [
+              { "type": "direct", "tag": "direct" }
+            ],
             "route": {
               "rule_set": [
                 {
                   "type": "remote",
                   "tag": "geoip-cn",
                   "format": "binary",
-                  "url": "http://127.0.0.1:8000/geoip-cn.srs",
-                  "update_interval": "24h"
+                  "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs"
                 },
                 {
                   "type": "remote",
                   "tag": "geosite-cn",
                   "format": "binary",
-                  "url": "http://127.0.0.1:8000/geosite-cn.srs",
-                  "update_interval": "24h"
+                  "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
                 },
                 {
                   "type": "remote",
                   "tag": "geosite-noncn",
                   "format": "binary",
-                  "url": "http://127.0.0.1:8000/geosite-noncn.srs",
-                  "update_interval": "24h"
+                  "url": "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/geolocation-!cn.srs"
                 }
-              ]
+              ],
+              "rules": [
+                { "rule_set": "geoip-cn", "outbound": "direct" },
+                { "rule_set": "geosite-cn", "outbound": "direct" },
+                { "rule_set": "geosite-noncn", "outbound": "direct" }
+              ],
+              "final": "direct"
             },
             "experimental": {
               "cache_file": {
                 "enabled": true,
-                "path": "cache/cache.db",
-                "store_fakeip": false,
-                "store_rdrc": false,
+                "path": "cache.db",
                 "store_dns": false
               }
             }
           }
           EOF
 
-      - name: Check config
+      - name: Run sing-box briefly to warm the cache
         run: |
-          set -e
-          "$SING_BOX" check -c config.json
-
-      - name: Generate cache.db
-        run: |
-          set -e
-
-          cd rules
-          python3 -m http.server 8000 >/tmp/http.log 2>&1 &
-          HTTP_PID=$!
-          cd ..
-
-          sleep 2
-
-          "$SING_BOX" run -c config.json &
-          SB_PID=$!
-
-          echo "Waiting for rule-sets..."
-
+          rm -f cache.db
+          ./sing-box run -c config.json &
+          PID=$!
+          # 轮询等 cache.db 出现并稳定下来（下载+落盘需要几秒）
           for i in $(seq 1 30); do
-            if [ -s cache/cache.db ]; then
-              echo "cache.db created."
+            sleep 1
+            if [ -s cache.db ]; then
+              sleep 5
               break
             fi
-            sleep 1
           done
+          kill "$PID" 2>/dev/null || true
+          wait "$PID" 2>/dev/null || true
 
-          kill "$SB_PID" 2>/dev/null || true
-          kill "$HTTP_PID" 2>/dev/null || true
+      - name: Verify cache.db is non-empty
+        run: |
+          test -s cache.db
+          ls -lh cache.db
+          file cache.db
 
-          wait "$SB_PID" 2>/dev/null || true
-
-          test -s cache/cache.db
-
-          echo
-          echo "Generated cache.db:"
-          ls -lh cache/cache.db
-
-      - name: Upload cache.db
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sing-box-rule-cache
-          path: cache/cache.db
+          name: cache.db
+          path: cache.db
           retention-days: 7
