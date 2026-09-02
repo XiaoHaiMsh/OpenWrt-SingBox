@@ -8,26 +8,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Download sing-box 1.14.0
         run: |
           set -e
 
           VERSION="1.14.0"
 
-          curl -L \
+          curl -fL \
             -o sing-box.tar.gz \
             "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
 
           tar -xzf sing-box.tar.gz
 
-          mv "sing-box-${VERSION}-linux-amd64/sing-box" ./sing-box
+          chmod +x "sing-box-${VERSION}-linux-amd64/sing-box"
 
-          chmod +x ./sing-box
+          "sing-box-${VERSION}-linux-amd64/sing-box" version
 
-          ./sing-box version
+          echo "SING_BOX=$PWD/sing-box-${VERSION}-linux-amd64/sing-box" >> "$GITHUB_ENV"
 
       - name: Download rule-sets
         run: |
@@ -49,7 +46,7 @@ jobs:
 
           ls -lh rules/
 
-      - name: Prepare clean cache environment
+      - name: Prepare cache environment
         run: |
           set -e
 
@@ -64,22 +61,25 @@ jobs:
             "route": {
               "rule_set": [
                 {
-                  "type": "local",
+                  "type": "remote",
                   "tag": "geoip-cn",
                   "format": "binary",
-                  "path": "rules/geoip-cn.srs"
+                  "url": "http://127.0.0.1:8000/geoip-cn.srs",
+                  "update_interval": "24h"
                 },
                 {
-                  "type": "local",
+                  "type": "remote",
                   "tag": "geosite-cn",
                   "format": "binary",
-                  "path": "rules/geosite-cn.srs"
+                  "url": "http://127.0.0.1:8000/geosite-cn.srs",
+                  "update_interval": "24h"
                 },
                 {
-                  "type": "local",
+                  "type": "remote",
                   "tag": "geosite-noncn",
                   "format": "binary",
-                  "path": "rules/geosite-noncn.srs"
+                  "url": "http://127.0.0.1:8000/geosite-noncn.srs",
+                  "update_interval": "24h"
                 }
               ]
             },
@@ -95,36 +95,45 @@ jobs:
           }
           EOF
 
+      - name: Check config
+        run: |
+          set -e
+          "$SING_BOX" check -c config.json
+
       - name: Generate cache.db
         run: |
           set -e
 
-          ./sing-box check -c config.json
+          cd rules
+          python3 -m http.server 8000 >/tmp/http.log 2>&1 &
+          HTTP_PID=$!
+          cd ..
 
-          ./sing-box run -c config.json &
+          sleep 2
+
+          "$SING_BOX" run -c config.json &
           SB_PID=$!
 
-          sleep 5
+          echo "Waiting for rule-sets..."
 
-          kill "$SB_PID" || true
-          wait "$SB_PID" || true
+          for i in $(seq 1 30); do
+            if [ -s cache/cache.db ]; then
+              echo "cache.db created."
+              break
+            fi
+            sleep 1
+          done
 
-          echo "Generated cache:"
-          ls -lh cache/
+          kill "$SB_PID" 2>/dev/null || true
+          kill "$HTTP_PID" 2>/dev/null || true
 
-      - name: Verify cache.db
-        run: |
-          set -e
+          wait "$SB_PID" 2>/dev/null || true
 
-          test -f cache/cache.db
           test -s cache/cache.db
 
-          echo "cache.db:"
-          ls -lh cache/cache.db
-
           echo
-          echo "SQLite file check:"
-          file cache/cache.db
+          echo "Generated cache.db:"
+          ls -lh cache/cache.db
 
       - name: Upload cache.db
         uses: actions/upload-artifact@v4
