@@ -1,0 +1,134 @@
+name: Build sing-box Rule Cache
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download sing-box 1.14.0
+        run: |
+          set -e
+
+          VERSION="1.14.0"
+
+          curl -L \
+            -o sing-box.tar.gz \
+            "https://github.com/SagerNet/sing-box/releases/download/v${VERSION}/sing-box-${VERSION}-linux-amd64.tar.gz"
+
+          tar -xzf sing-box.tar.gz
+
+          mv "sing-box-${VERSION}-linux-amd64/sing-box" ./sing-box
+
+          chmod +x ./sing-box
+
+          ./sing-box version
+
+      - name: Download rule-sets
+        run: |
+          set -e
+
+          mkdir -p rules
+
+          curl -fL \
+            -o rules/geoip-cn.srs \
+            "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geoip/cn.srs"
+
+          curl -fL \
+            -o rules/geosite-cn.srs \
+            "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/cn.srs"
+
+          curl -fL \
+            -o rules/geosite-noncn.srs \
+            "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/sing/geo/geosite/geolocation-!cn.srs"
+
+          ls -lh rules/
+
+      - name: Prepare clean cache environment
+        run: |
+          set -e
+
+          rm -rf cache
+          mkdir -p cache
+
+          cat > config.json <<'EOF'
+          {
+            "log": {
+              "level": "info"
+            },
+            "route": {
+              "rule_set": [
+                {
+                  "type": "local",
+                  "tag": "geoip-cn",
+                  "format": "binary",
+                  "path": "rules/geoip-cn.srs"
+                },
+                {
+                  "type": "local",
+                  "tag": "geosite-cn",
+                  "format": "binary",
+                  "path": "rules/geosite-cn.srs"
+                },
+                {
+                  "type": "local",
+                  "tag": "geosite-noncn",
+                  "format": "binary",
+                  "path": "rules/geosite-noncn.srs"
+                }
+              ]
+            },
+            "experimental": {
+              "cache_file": {
+                "enabled": true,
+                "path": "cache/cache.db",
+                "store_fakeip": false,
+                "store_rdrc": false,
+                "store_dns": false
+              }
+            }
+          }
+          EOF
+
+      - name: Generate cache.db
+        run: |
+          set -e
+
+          ./sing-box check -c config.json
+
+          ./sing-box run -c config.json &
+          SB_PID=$!
+
+          sleep 5
+
+          kill "$SB_PID" || true
+          wait "$SB_PID" || true
+
+          echo "Generated cache:"
+          ls -lh cache/
+
+      - name: Verify cache.db
+        run: |
+          set -e
+
+          test -f cache/cache.db
+          test -s cache/cache.db
+
+          echo "cache.db:"
+          ls -lh cache/cache.db
+
+          echo
+          echo "SQLite file check:"
+          file cache/cache.db
+
+      - name: Upload cache.db
+        uses: actions/upload-artifact@v4
+        with:
+          name: sing-box-rule-cache
+          path: cache/cache.db
+          retention-days: 7
